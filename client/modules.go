@@ -1,29 +1,58 @@
 package client
 
 import (
-	"bytes"
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"time"
 
-	"github.com/OKESTRO-AIDevOps/nkia/nokubectl/config"
-	ctrl "github.com/OKESTRO-AIDevOps/nkia/nokubelet/controller"
-	"github.com/OKESTRO-AIDevOps/nkia/nokubelet/modules"
+	cconf "github.com/OKESTRO-AIDevOps/nkia/nokubectl/config"
 	"github.com/OKESTRO-AIDevOps/nkia/pkg/apistandard"
+	ctrl "github.com/OKESTRO-AIDevOps/nkia/pkg/apistandard/apix"
+	modules "github.com/OKESTRO-AIDevOps/nkia/pkg/challenge"
 	"github.com/gorilla/websocket"
 )
 
 var PRINT_ONLY_BODY map[string]string
 
-func KeyAuthConn(client *http.Client, email string) (*websocket.Conn, error) {
+func CertAuthConn(client *websocket.Conn) error {
 
-	var c *websocket.Conn
+	var req_orchestrator ctrl.OrchestratorRequest
+
+	var resp_orchestrator ctrl.OrchestratorResponse
+
+	file_b, err := os.ReadFile(".npia/certs/client.crt")
+
+	if err != nil {
+
+		return fmt.Errorf("cert auth: %s", err.Error())
+
+	}
+
+	req_orchestrator.Query = string(file_b)
+
+	err = client.WriteJSON(req_orchestrator)
+
+	if err != nil {
+		return fmt.Errorf("auth: %s", err.Error())
+	}
+
+	err = client.ReadJSON(&resp_orchestrator)
+
+	if err != nil {
+		return fmt.Errorf("auth: %s", err.Error())
+	}
+
+	if resp_orchestrator.ServerMessage != "SUCCESS" {
+		return fmt.Errorf("auth: %s", err.Error())
+	}
+
+	return nil
+}
+
+func KeyAuthConn(client *websocket.Conn, email string) error {
 
 	var req_orchestrator ctrl.OrchestratorRequest
 
@@ -31,29 +60,20 @@ func KeyAuthConn(client *http.Client, email string) (*websocket.Conn, error) {
 
 	req_orchestrator.Query = email
 
-	req_b, err := json.Marshal(req_orchestrator)
+	err := client.WriteJSON(req_orchestrator)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
-	resp, err := client.Post(config.COMM_URL_AUTH, "application/json", bytes.NewBuffer(req_b))
+	err = client.ReadJSON(&resp_orchestrator)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
-	body_bytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
-	}
-
-	resp.Body.Close()
-
-	err = json.Unmarshal(body_bytes, &resp_orchestrator)
-
-	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+	if resp_orchestrator.ServerMessage != "SUCCESS" {
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	chal_rec := modules.ChallengRecord{}
@@ -63,15 +83,15 @@ func KeyAuthConn(client *http.Client, email string) (*websocket.Conn, error) {
 	err = json.Unmarshal(chal_rec_b, &chal_rec)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	// get privkey from srv/.priv
 
-	priv_key, err := LoadKeyAuthCredential()
+	priv_key, err := cconf.LoadKeyAuthCredential()
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	// decrypt the challenge
@@ -89,13 +109,13 @@ func KeyAuthConn(client *http.Client, email string) (*websocket.Conn, error) {
 	cipher_b, err := hex.DecodeString(cipher_txt)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	ans, err := modules.DecryptWithPrivateKey(cipher_b, priv_key)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	ans_str := string(ans)
@@ -110,56 +130,25 @@ func KeyAuthConn(client *http.Client, email string) (*websocket.Conn, error) {
 		Query: query_base64,
 	}
 
-	req_b, err = json.Marshal(req_orchestrator)
-
-	resp, err = client.Post(config.COMM_URL_AUTH_CALLBACK, "application/json", bytes.NewBuffer(req_b))
+	err = client.WriteJSON(req_orchestrator)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	resp_orchestrator = ctrl.OrchestratorResponse{}
 
-	body_bytes, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
-	}
-
-	resp.Body.Close()
-
-	err = json.Unmarshal(body_bytes, &resp_orchestrator)
+	err = client.ReadJSON(&resp_orchestrator)
 
 	if err != nil {
-		return c, fmt.Errorf("auth: %s", err.Error())
+		return fmt.Errorf("auth: %s", err.Error())
 	}
 
 	if resp_orchestrator.ServerMessage != "SUCCESS" {
-		return c, fmt.Errorf("auth: %s", resp_orchestrator.ServerMessage)
+		return fmt.Errorf("auth: %s", resp_orchestrator.ServerMessage)
 	}
 
-	req_key := resp_orchestrator.QueryResult
-
-	req_key_b64 := base64.StdEncoding.EncodeToString(req_key)
-
-	req_orchestrator = ctrl.OrchestratorRequest{
-		RequestOption: req_key_b64,
-	}
-
-	fmt.Println("connecting to the command channel...")
-
-	c, _, err = websocket.DefaultDialer.Dial(config.COMM_URL, nil)
-
-	if err != nil {
-		return c, fmt.Errorf("auth conn: %s", err.Error())
-	}
-
-	err = c.WriteJSON(req_orchestrator)
-
-	if err != nil {
-		return c, fmt.Errorf("auth conn: %s", err.Error())
-	}
-
-	return c, nil
+	return nil
 }
 
 func RequestHandler_LinearInstruction_Persist_PrintOnly(c *websocket.Conn, target string, option string, linear_instruction string) {
@@ -268,7 +257,7 @@ func RequestHandler_APIX_Once_PrintOnly(c *websocket.Conn, req_orchestrator ctrl
 
 }
 
-func RequestHandler_APIX_Store_Override(c *websocket.Conn, req_orchestrator ctrl.OrchestratorRequest) {
+func Do(c *websocket.Conn, req_orchestrator ctrl.OrchestratorRequest) {
 
 	recv := make(chan ctrl.OrchestratorResponse)
 
@@ -276,18 +265,9 @@ func RequestHandler_APIX_Store_Override(c *websocket.Conn, req_orchestrator ctrl
 
 	var OUT apistandard.API_OUTPUT
 
-	var HEAD apistandard.API_METADATA
+	//var HEAD apistandard.API_METADATA
 
 	var BODY string
-
-	req_b, err := json.Marshal(req_orchestrator)
-
-	if err != nil {
-		panic(err.Error())
-
-	}
-
-	_ = os.WriteFile(".npia/_apix_o/REQ", req_b, 0644)
 
 	go RequestHandler_ReadChannel(c, recv)
 
@@ -308,30 +288,34 @@ func RequestHandler_APIX_Store_Override(c *websocket.Conn, req_orchestrator ctrl
 			err := json.Unmarshal(result.QueryResult, &OUT)
 
 			if err != nil {
-				panic(err.Error())
+				fmt.Fprintf(os.Stderr, "err: %s", err.Error())
+
+				return
 			}
 
 			if MSG != "SUCCESS" {
-				panic(err.Error())
+
+				fmt.Fprintf(os.Stderr, "failed: %s", MSG)
+
+				return
 			}
 
-			_ = os.WriteFile(".npia/_apix_o/MSG", []byte(MSG), 0644)
-
-			HEAD = OUT.HEAD
+			//HEAD = OUT.HEAD
 
 			BODY = OUT.BODY
 
-			head_b, err := json.Marshal(HEAD)
+			//head_b, err := json.Marshal(HEAD)
 
 			if err != nil {
-				panic(err.Error())
+
+				fmt.Fprintf(os.Stderr, "err: %s", err.Error())
 			}
 
-			_ = os.WriteFile(".npia/_apix_o/HEAD", head_b, 0644)
+			//_ = os.WriteFile(".npia/_output/HEAD", head_b, 0644)
 
-			_ = os.WriteFile(".npia/_apix_o/BODY", []byte(BODY), 0644)
+			//_ = os.WriteFile(".npia/_output/BODY", []byte(BODY), 0644)
 
-			fmt.Println("SUCCESS")
+			fmt.Fprintf(os.Stdout, "%s", BODY)
 
 			return
 
@@ -364,23 +348,4 @@ func RequestHandler_ReadChannel(c *websocket.Conn, recv chan ctrl.OrchestratorRe
 
 	recv <- resp_body
 
-}
-
-func LoadKeyAuthCredential() (*rsa.PrivateKey, error) {
-
-	var ret_key *rsa.PrivateKey
-
-	key_b, err := os.ReadFile(".npia/.priv")
-
-	if err != nil {
-		return ret_key, fmt.Errorf("failed to load cred: %s", err.Error())
-	}
-
-	ret_key, err = modules.BytesToPrivateKey(key_b)
-
-	if err != nil {
-		return ret_key, fmt.Errorf("failed to load cred: %s", err.Error())
-	}
-
-	return ret_key, nil
 }
